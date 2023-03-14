@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use image::PaletteImage;
 use rand_wyrand::WyRand;
 use std::{
     borrow::Borrow,
@@ -10,7 +11,6 @@ use std::{
 };
 
 use itertools::{iproduct};
-use ndarray::prelude::*;
 use rand::{distributions::WeightedIndex, SeedableRng, Rng};
 use rayon::prelude::{
     IntoParallelRefIterator, ParallelBridge,
@@ -29,16 +29,22 @@ use crate::{
 
 type BitvecUnderlyingType = u32;
 
-// TODO! make this an ndarray as well
-#[derive(Eq, Hash, Debug, Clone)]
+#[derive(Eq, PartialEq, Hash, Debug, Clone)]
 struct Pattern {
     size: usize,
-    pixels: Array2<usize>,
+    pixels: Vec<usize>
 }
 
 impl Pattern {
-    pub fn from_image_and_offset(image: &Array2<usize>, (y, x): (usize, usize), n: usize) -> Self {
-        let pixels = image.slice(s![y..y + n, x..x + n]).mapv(|e| e);
+    pub fn from_image_and_offset(image: &PaletteImage, (y, x): (usize, usize), n: usize) -> Self {
+        let PaletteImage { width, .. } = image;
+        let pixels = iproduct!(y..y+n, x..x+n)
+            .map(|(y, x)| {
+                let index = y*width + x;
+                image.pixels[index]
+            })
+            .collect();
+
         Self { size: n, pixels }
     }
 
@@ -51,10 +57,8 @@ impl Pattern {
         let range_y = (0.max(*offset_y) as usize)..((offset_y + size).min(size) as usize);
 
         // Slice the thing
-        self.pixels
-            .slice(s![range_y, range_x])
-            .iter()
-            .copied()
+        iproduct!(range_y, range_x)
+            .map(|(y, x)| self.pixels[y*self.size + x])
             .collect()
     }
 
@@ -72,15 +76,6 @@ enum ObserveResult {
     Collapse,
 }
 
-impl PartialEq<Pattern> for Pattern {
-    fn eq(&self, other: &Pattern) -> bool {
-        if self.size != other.size {
-            return false;
-        }
-        self.pixels == other.pixels
-    }
-}
-
 fn generate_pattern_offsets(n: i32) -> Vec<(i32, i32)> {
     iproduct!(-n + 1..n, -n + 1..n)
         .par_bridge()
@@ -89,13 +84,14 @@ fn generate_pattern_offsets(n: i32) -> Vec<(i32, i32)> {
 }
 
 fn generate_patterns_frequencies_probabilities_from_image(
-    sample: &Array2<usize>,
+    sample: &PaletteImage,
     n: usize,
-) -> (Vec<Pattern>, Array1<usize>, Array1<f64>) {
+) -> (Vec<Pattern>, Vec<usize>, Vec<f64>) {
     // TODO! flip, rotate
     let mut pattern_map: HashMap<Pattern, usize> = HashMap::new();
 
-    let (height, width) = sample.dim();
+    let PaletteImage{ width, height, .. } = sample;
+
     for y in 0..(height - n) {
         for x in 0..(width - n) {
             let pattern = Pattern::from_image_and_offset(sample, (y, x), n);
@@ -103,21 +99,19 @@ fn generate_patterns_frequencies_probabilities_from_image(
         }
     }
     let patterns = pattern_map.keys().into_iter().cloned().collect();
-    let frequencies = pattern_map.values().into_iter().cloned().collect();
+    let frequencies: Vec<_> = pattern_map.values().into_iter().cloned().collect();
 
-    let frequencies = Array::from_vec(frequencies);
-
-    let frequency_sum = frequencies.mapv(|e| e as f64).sum();
-    let probabilities = frequencies.mapv(|e| e as f64) / frequency_sum;
+    let frequency_sum: f64 = frequencies.iter().map(|e| *e as f64).sum();
+    let probabilities = frequencies.iter().map(|e| (*e as f64) / frequency_sum).collect();
 
     (patterns, frequencies, probabilities)
 }
 
 fn generate_palette_from_image(sample: &Image) -> (Vec<[u16; 4]>, HashMap<[u16; 4], usize>) {
-    let palette_set: HashSet<[u16; 4]> = sample.iter().copied().collect();
+    let palette_set: HashSet<[u16; 4]> = sample.pixels.iter().copied().collect();
     let reverse_palette: HashMap<[u16; 4], usize> = palette_set
         .borrow()
-        .into_iter()
+        .iter()
         .copied()
         .enumerate()
         .map(|(idx, pixel)| (pixel, idx))
@@ -134,12 +128,17 @@ fn generate_palette_from_image(sample: &Image) -> (Vec<[u16; 4]>, HashMap<[u16; 
 fn encode_image_to_palette(
     sample: &Image,
     reverse_palette: &HashMap<[u16; 4], usize>,
-) -> Array2<usize> {
-    sample.mapv(|e| *reverse_palette.get(&e).unwrap())
+) -> PaletteImage {
+    let Image{ width, height, pixels } = sample;
+    PaletteImage {
+        width: *width,
+        height: *height,
+        pixels: pixels.iter().map(| pixel | reverse_palette.get(pixel).unwrap()).copied().collect()
+    }
 }
 
 /// Generate the rules for a given set of patterns, output is a list for ea. pattern, which contains a list of Rules
-fn generate_rules(patterns: &Vec<Pattern>, offsets: &Vec<(i32, i32)>) -> Vec<Vec<Vec<usize>>> {
+fn generate_rules(patterns: &Vec<Pattern>, offsets: &[(i32, i32)]) -> Vec<Vec<Vec<usize>>> {
     patterns
         .par_iter()
         .map(|pattern| {
@@ -167,11 +166,10 @@ fn generate_rules(patterns: &Vec<Pattern>, offsets: &Vec<(i32, i32)>) -> Vec<Vec
 
 fn render_image_from_coefficients(
     coefficient_matrix: &BitVec<u32, Msb0>,
-    patterns: &Vec<Pattern>,
-    palette: &Vec<[u16; 4]>,
+    patterns: &[Pattern],
+    palette: &[[u16; 4]],
     output_shape: &(usize, usize, usize)
 ) -> Image {
-    // let height, width, _) = *output_shape;
     let height = output_shape.0;
     let width = output_shape.1;
 
@@ -186,19 +184,6 @@ fn render_image_from_coefficients(
     // For a 3x3, 2x2, 4x4 we need 1px extra on each side, I think this generalized to any other size as well
     // Only for a 1x1 pattern, this doesnt not hold, but the whole algorithm breaks down.
 
-    // Collapse the coefficient matrix to a pattern index matrix
-    // let pattern_index_matrix: Array2<Vec<&Pattern>> =
-    //     coefficient_matrix.map_axis(Axis(2), |wavefunction| {
-    //         let possible_pattern_list: Vec<&Pattern> = wavefunction
-    //             .iter()
-    //             .enumerate()
-    //             // Filter out zero elements
-    //             .filter(|(_, e)| **e > 0.0)
-    //             // Map indices to patterns
-    //             .map(|(index, _)| &patterns[index])
-    //             .collect();
-    //         possible_pattern_list
-    //     });
     let pattern_index_matrix: Vec<Vec<&Pattern>> = iproduct!(0..output_shape.0, 0..output_shape.1)
         .map(| (y, x)| {
             let start_index = ((y * output_shape.1) + x) * output_shape.2;
@@ -212,13 +197,12 @@ fn render_image_from_coefficients(
                 .collect::<Vec<&Pattern>>()
         }).collect();
     
-    // let mut preimage: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); width * pattern_size + 2]; height * pattern_size + 2];
-    let mut preimage: Array2<Vec<usize>> = Array2::from_elem(
-        (width + pattern_size - 1, height + pattern_size - 1),
-        Vec::new(),
-    );
+    let preimage_width = width + pattern_size - 1;
+    let preimage_height =  height + pattern_size - 1;
 
-    // // Shingle the patterns out
+    let mut preimage: Vec<Vec<usize>> = Vec::with_capacity(preimage_width*preimage_height);
+
+    // Shingle the patterns out
     for y in 0..height {
         for x in 0..width {
             // Get the pattern
@@ -228,35 +212,39 @@ fn render_image_from_coefficients(
                 for xx in 0..pattern_size {
                     let mut pixel_indices: Vec<usize> = patterns
                         .iter()
-                        .map(|pattern| pattern.pixels[(yy, xx)])
+                        .map(|pattern| pattern.pixels[(yy*pattern.size + xx)])
                         .collect();
-                    preimage[(y + yy, x + xx)].append(&mut pixel_indices);
+                    let preimage_index = (y+yy)*preimage_width + (x+xx);
+                    preimage[preimage_index].append(&mut pixel_indices);
                 }
             }
         }
     }
 
     // Collapse the preimage!
-    // let mut max = 0;
-    // let mut min = 100;
-    let image = preimage.mapv(|pixel_indices| {
-        let n = pixel_indices.len();
-        // max = max.max(n);
-        // min = min.min(n);
-        pixel_indices
-            .iter()
-            // Map to pixels
-            .map(|&index| palette[index].map(f64::from))
-            // Accumulate (This version requires unstable code :))
-            // .fold([0.0; 4], | acc, e | acc.zip(e).map(| a, b | a + b))
-            .fold([0.0; 4], |acc, e| {
-                [acc[0] + e[0], acc[1] + e[1], acc[2] + e[2], acc[3] + e[3]]
-            })
-            // Normalize! and cast back
-            .map(|e| (e / n as f64) as u16)
-    });
-    // println!("\n min_count: {}, max_count: {}", min, max);
-    image
+    let collapsed_pixels = preimage
+        .iter()
+        .map(| indices | {
+            let n = indices.len();
+            indices
+                .iter()
+                // Map to pixels
+                .map(|&index| palette[index].map(f64::from))
+                // Accumulate (This version requires unstable code :))
+                // .fold([0.0; 4], | acc, e | acc.zip(e).map(| a, b | a + b))
+                .fold([0.0; 4], |acc, e| {
+                    [acc[0] + e[0], acc[1] + e[1], acc[2] + e[2], acc[3] + e[3]]
+                })
+                // Normalize! and cast back
+                .map(|e| (e / n as f64) as u16)
+        })
+        .collect();
+    
+    Image {
+        width: preimage_width,
+        height: preimage_height,
+        pixels: collapsed_pixels
+    }
 }
 
 // Helper methods
@@ -277,7 +265,7 @@ fn is_cell_collapsed(
 fn collapse_single_cell(
     (y, x): &(usize, usize),
     coefficient_matrix: &mut BitVec<u32, Msb0>,
-    probabilities: &Array1<f64>,
+    probabilities: &[f64],
     rng: &mut WyRand,
     output_shape: &(usize, usize, usize),
 ) {
@@ -300,8 +288,6 @@ fn collapse_single_cell(
         .map(|e| e / weighted_probabilities_sum)
         .collect();
 
-    // println!("{:?} - {:?} | {}", possible_choices.iter().map(| e |*e).collect::<Vec<bool>>(), weighted_probabilities, weighted_probabilities_sum);
-
     // Construct a distribution from the probabilties
     let distribution = WeightedIndex::new(&weighted_probabilities).unwrap();
     let picked_collapse_index = rng.sample(distribution);
@@ -317,7 +303,7 @@ fn collapse_single_cell(
 
 fn observe(
     coefficient_matrix: &mut BitVec<u32, Msb0>,
-    probabilities: &Array1<f64>,
+    probabilities: &[f64],
     rng: &mut WyRand,
     output_shape: &(usize, usize, usize),
 ) -> ObserveResult {
@@ -330,14 +316,6 @@ fn observe(
             let start_index = ((y * output_shape.1) + x) * output_shape.2;
             coefficient_matrix[start_index..start_index + output_shape.2].not_any()
         });
-    
-    // iproduct!(0..output_shape.0, 0..output_shape.1)
-    // .par_bridge()
-    // .for_each(|(y, x)| {
-    //     let start_index = ((y * output_shape.1) + x) * output_shape.2;
-    //     let tmp = &coefficient_matrix[start_index..start_index + output_shape.2];
-    //     println!("({:03}, {:03}){:?} | {}", y, x, tmp.iter().map(| e | *e).collect::<Vec<bool>>(), tmp.count_ones());
-    // });
 
     if has_contradiction {
         return ObserveResult::Contradiction;
@@ -359,12 +337,6 @@ fn observe(
                 .sum()
         })
         .collect();
-
-    // (0..output_shape.0).into_iter().for_each(| y | {
-    //     let start_index = y*output_shape.1;
-    //     let slice = &entropy_matrix[start_index..start_index + output_shape.1];
-    //     println!("em row {}: {:?}", y, slice);
-    // });
 
     // Calculate total entropy
     let total_entropy: f64 = entropy_matrix.par_iter().sum();
@@ -392,18 +364,9 @@ fn observe(
         .map(|(index, _)| index)
         .collect();
 
-    // Print the current progress
-    // TODO! progressbar!
-    // println!(
-    //     "Total entropy: {:.02}, non-collapsed cell minimum entropy = {:.02}",
-    //     total_entropy, min_entropy
-    // );
-
     // Select one of the min-entropy-indices to collapse
     // TODO! Technically we should check if this has any elements left.
     let selected_index = min_entropy_indices[rng.gen_range(0..min_entropy_indices.len())];
-    // println!("Selected Index: {:?}", selected_index);
-    // println!("Entropy @ selected index: {}", entropy_matrix[(selected_index.0 * output_shape.1) + selected_index.1]);
 
     // Collapse the selected cell
     collapse_single_cell(
@@ -422,7 +385,7 @@ fn propagate_cell(
     offset: &(i32, i32),
     offset_index: usize,
     coefficient_matrix: &mut BitVec<u32, Msb0>,
-    rules: &Vec<Vec<Vec<usize>>>,
+    rules: &[Vec<Vec<usize>>],
     output_shape: &(usize, usize, usize),
 ) -> bool {
     let adjacent_cell_position = (
@@ -458,23 +421,12 @@ fn propagate_cell(
         .flat_map(|&pattern_index| rules[pattern_index][offset_index].clone())
         .for_each(|index| allowed_states_adjacent.set(index, true));
 
-    // dbg!(&position);
-    // dbg!(&adjacent_cell_position);
-    // dbg!(start_index_adjacent);
-    // dbg!(start_index_origin);
-    // dbg!(allowed_states_adjacent.count_ones());
-    // dbg!(valid_pattern_mask_adjacent.count_ones());
-
     // Mask the possible against the allowed states
     let weighted_wavemask_adjacent = allowed_states_adjacent & valid_pattern_mask_adjacent;
-    // dbg!(weighted_wavemask_adjacent.count_ones());
-    // println!("");
-
-    // println!("{:?}: {}", adjacent_cell_position, weighted_wavemask_adjacent.count_ones());
 
     // Check if we changed anything (xor and count zeros would also be possible)
     // if (weighted_wavemask_adjacent.clone() ^ valid_pattern_mask_adjacent).count_ones() == 0 { return false }
-    if weighted_wavemask_adjacent.contains(&valid_pattern_mask_adjacent) {
+    if weighted_wavemask_adjacent.contains(valid_pattern_mask_adjacent) {
         return false;
     }
 
@@ -488,21 +440,15 @@ fn propagate_cell(
 fn propagate(
     position: (usize, usize),
     coefficient_matrix: &mut BitVec<u32, Msb0>,
-    rules: &Vec<Vec<Vec<usize>>>,
-    offsets: &Vec<(i32, i32)>,
+    rules: &[Vec<Vec<usize>>],
+    offsets: &[(i32, i32)],
     output_shape: &(usize, usize, usize),
 ) {
     // println!("Propagating changes...");
     let mut propagation_queue = vec![position];
 
     while let Some(position) = propagation_queue.pop() {
-        // println!(
-        //     "\nProcessing propagation for {:?} | considering {} offsets",
-        //     &position,
-        //     offsets.len()
-        // );
-        for offset_index in 0..offsets.len() {
-            let offset = offsets[offset_index];
+        for (offset_index, offset) in offsets.iter().enumerate() {
             let adjacent_cell_position = (
                 (position.0 as i32 + offset.0) as usize,
                 (position.1 as i32 + offset.1) as usize,
@@ -515,7 +461,7 @@ fn propagate(
                 // Propagate in the chosen direction
                 if propagate_cell(
                     &position,
-                    &offset,
+                    offset,
                     offset_index,
                     coefficient_matrix,
                     rules,
@@ -552,7 +498,7 @@ fn main() -> Result<()> {
     let empty_rules = rules.iter().fold(0, |acc, rl| {
         acc + rl
             .iter()
-            .fold(0, |acc, e| if e.len() == 0 { acc + 1 } else { acc })
+            .fold(0, |acc, e| if e.is_empty() { acc + 1 } else { acc })
     });
     println!("There's {} empty_rules", empty_rules);
 
@@ -606,7 +552,7 @@ fn main() -> Result<()> {
         save_image_to_path(&step_image, Path::new(&format!("steps/iteration_{}.png", iteration_index)))?;
         iteration_index += 1;
     };
-    println!("");
+    println!();
 
     match result {
         ObserveResult::Collapse => {
