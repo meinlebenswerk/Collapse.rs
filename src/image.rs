@@ -1,11 +1,23 @@
 use std::{fs::File, path::Path, io::BufWriter};
 
 use anyhow::Result;
-use ndarray::{Array2, Array};
 use pix::{el::Pixel, Raster};
 use png_pong::{Decoder, Encoder};
 
-pub type Image = Array2<[u16; 4]>;
+pub struct Image {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<[u16; 4]>
+}
+
+
+pub struct PaletteImage {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<usize>
+}
+
+
 // Load an image from a path, converts results to RGB by default.
 pub fn load_image_from_path(path: &String) -> Result<Image> {
     let file = File::open(path)?;
@@ -15,17 +27,20 @@ pub fn load_image_from_path(path: &String) -> Result<Image> {
 
     
     // Convert all formats into the same RGBA16 internal format
-    let image: Array2<[u16; 4]> = match raster {
+    let image = match raster {
         png_pong::PngRaster::Gray8(raster) => {
             println!("G8");
             let width = raster.width() as usize;
             let height = raster.height() as usize;
-            Array::from_shape_vec((height, width),
-                raster.pixels().iter()
+            let pixels = raster.pixels().iter()
                 .map(| pixel | [pixel.one().into(), pixel.one().into(), pixel.one().into(), 0xff])
                 .map(| pixel| pixel.map(u16::from))
-                .collect()
-            )?
+                .collect();
+            Image {
+                width,
+                height,
+                pixels
+            }
         },
         png_pong::PngRaster::Gray16(_) => {
             println!("G16");
@@ -35,12 +50,15 @@ pub fn load_image_from_path(path: &String) -> Result<Image> {
             println!("RGB8");
             let width = raster.width() as usize;
             let height = raster.height() as usize;
-            Array::from_shape_vec((height, width),
-                raster.pixels().iter()
+            let pixels = raster.pixels().iter()
                 .map(| pixel | [pixel.one().into(), pixel.two().into(), pixel.three().into(), 0xff])
                 .map(| pixel| pixel.map(u16::from))
-                .collect()
-            )?
+                .collect();
+            Image {
+                width,
+                height,
+                pixels
+            }
         },
         png_pong::PngRaster::Rgb16(_) => {
             println!("RGB16");
@@ -62,16 +80,28 @@ pub fn load_image_from_path(path: &String) -> Result<Image> {
             println!("RGBA8");
             let width = raster.width() as usize;
             let height = raster.height() as usize;
-            Array::from_shape_vec((height, width),
-                raster.pixels().iter()
+            let pixels = raster.pixels().iter()
                 .map(| pixel | [pixel.one().into(), pixel.two().into(), pixel.three().into(), pixel.four().into()])
                 .map(| pixel: [u8; 4]| pixel.map(u16::from))
-                .collect()
-            )?
+            .collect();
+            Image {
+                width,
+                height,
+                pixels
+            }
         },
-        png_pong::PngRaster::Rgba16(_) => {
+        png_pong::PngRaster::Rgba16(raster) => {
             println!("RGBA16");
-            todo!()
+            let width = raster.width() as usize;
+            let height = raster.height() as usize;
+            let pixels = raster.pixels().iter()
+                .map(| pixel | [pixel.one().into(), pixel.two().into(), pixel.three().into(), pixel.four().into()])
+            .collect();
+            Image {
+                width,
+                height,
+                pixels
+            }
         },
     };
 
@@ -79,9 +109,9 @@ pub fn load_image_from_path(path: &String) -> Result<Image> {
 }
 
 pub fn save_image_to_path(image: &Image, path: &Path) -> Result<()> {
-    let (height, width) = image.dim();
-    let buffer: Vec<u16> = image.iter().flat_map(| e | e).copied().collect();
-    let raster: Raster<pix::rgb::SRgba16> = Raster::with_u16_buffer(width as u32, height as u32, buffer);
+    let Image{height, width, .. } = image;
+    let buffer: Vec<u16> = image.pixels.iter().flatten().copied().collect();
+    let raster: Raster<pix::rgb::SRgba16> = Raster::with_u16_buffer(*width as u32, *height as u32, buffer);
 
     let writer = BufWriter::new(File::create(path)?);
     let mut encoder = Encoder::new(writer).into_step_enc();
