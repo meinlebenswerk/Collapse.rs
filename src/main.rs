@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bitflags::bitflags;
 use clap::Parser;
 use image::PaletteImage;
 use rand_wyrand::WyRand;
@@ -28,6 +29,19 @@ use crate::{
 };
 
 type BitvecUnderlyingType = u32;
+
+bitflags! {
+    struct Symmetry: u8 {
+        const ROTATE_90         = 0b00000001;
+        const ROTATE_180        = 0b00000010;
+        const ROTATE_270        = 0b00000100;
+        const FLIP_X            = 0b00001000;
+        const FLIP_Y            = 0b00010000;
+        const FLIP_X_ROTATE_90  = 0b00100000;
+        const FLIP_Y_ROTATE_90  = 0b01000000;
+    }
+}
+
 
 #[derive(Eq, PartialEq, Hash, Debug, Clone)]
 struct Pattern {
@@ -67,6 +81,58 @@ impl Pattern {
         let masked_values_other = other._mask_with_offset(&(-offset.0, -offset.1));
         masked_values_self == masked_values_other
     }
+
+    // Symmetry helpers
+    fn rotate_90deg(&self) -> Self {
+        let pixels: Vec<_> = iproduct!(0..self.size, 0..self.size)
+            .map(|(y, x)| {
+                // Transposed indices
+                let index = x * self.size + y;
+                self.pixels[index]
+            })
+            .collect();
+
+        Self {
+            size: self.size,
+            pixels
+        }
+    }
+    
+    fn rotate_180deg(&self) -> Self {
+        self.rotate_90deg().rotate_90deg()
+    }
+    
+    fn rotate_270deg(&self) -> Self {
+        self.rotate_90deg().rotate_90deg().rotate_90deg()
+    }
+
+    fn flip_x(&self) -> Self {
+        let pixels: Vec<_> = iproduct!(0..self.size, 0..self.size)
+            .map(|(y, x)| {
+                let index = y * self.size + (self.size - x - 1) ;
+                self.pixels[index]
+            })
+            .collect();
+
+        Self {
+            size: self.size,
+            pixels
+        }
+    }
+
+    fn flip_y(&self) -> Self {
+        let pixels: Vec<_> = iproduct!(0..self.size, 0..self.size)
+            .map(|(y, x)| {
+                let index = (self.size - y - 1) * self.size + x;
+                self.pixels[index]
+            })
+            .collect();
+
+        Self {
+            size: self.size,
+            pixels
+        }
+    }
 }
 
 #[derive(PartialEq)]
@@ -86,15 +152,48 @@ fn generate_pattern_offsets(n: i32) -> Vec<(i32, i32)> {
 fn generate_patterns_frequencies_probabilities_from_image(
     sample: &PaletteImage,
     n: usize,
+    symmetry: Symmetry
 ) -> (Vec<Pattern>, Vec<usize>, Vec<f64>) {
-    // TODO! flip, rotate
     let mut pattern_map: HashMap<Pattern, usize> = HashMap::new();
 
     let PaletteImage{ width, height, .. } = sample;
 
     for y in 0..(height - n) {
         for x in 0..(width - n) {
+            // Base pattern
             let pattern = Pattern::from_image_and_offset(sample, (y, x), n);
+            
+            // Symmetries, if required
+            if symmetry.contains(Symmetry::ROTATE_90) {
+                let sym_pattern = pattern.rotate_90deg();
+                *pattern_map.entry(sym_pattern).or_insert(0) += 1;
+            }
+            if symmetry.contains(Symmetry::ROTATE_180) {
+                let sym_pattern = pattern.rotate_180deg();
+                *pattern_map.entry(sym_pattern).or_insert(0) += 1;
+            }
+            if symmetry.contains(Symmetry::ROTATE_270) {
+                let sym_pattern = pattern.rotate_270deg();
+                *pattern_map.entry(sym_pattern).or_insert(0) += 1;
+            }
+            if symmetry.contains(Symmetry::FLIP_X) {
+                let sym_pattern = pattern.flip_x();
+                *pattern_map.entry(sym_pattern).or_insert(0) += 1;
+            }
+            if symmetry.contains(Symmetry::FLIP_Y) {
+                let sym_pattern = pattern.flip_y();
+                *pattern_map.entry(sym_pattern).or_insert(0) += 1;
+            }
+            if symmetry.contains(Symmetry::FLIP_X_ROTATE_90) {
+                let sym_pattern = pattern.flip_x().rotate_90deg();
+                *pattern_map.entry(sym_pattern).or_insert(0) += 1;
+            }
+            if symmetry.contains(Symmetry::FLIP_Y_ROTATE_90) {
+                let sym_pattern = pattern.flip_y().rotate_90deg();
+                *pattern_map.entry(sym_pattern).or_insert(0) += 1;
+            }
+
+            // Insert base pattern into pattern_map
             *pattern_map.entry(pattern).or_insert(0) += 1;
         }
     }
@@ -200,7 +299,7 @@ fn render_image_from_coefficients(
     let preimage_width = width + pattern_size - 1;
     let preimage_height =  height + pattern_size - 1;
 
-    let mut preimage: Vec<Vec<usize>> = Vec::with_capacity(preimage_width*preimage_height);
+    let mut preimage: Vec<Vec<usize>> = vec![Vec::new(); preimage_width*preimage_height];
 
     // Shingle the patterns out
     for y in 0..height {
@@ -485,7 +584,11 @@ fn main() -> Result<()> {
     let (palette, reverse_palette) = generate_palette_from_image(&sample);
     let sample = encode_image_to_palette(&sample, &reverse_palette);
     let (patterns, _, pattern_probabilities) =
-        generate_patterns_frequencies_probabilities_from_image(&sample, args.n as usize);
+        generate_patterns_frequencies_probabilities_from_image(
+            &sample,
+            args.n as usize,
+            if args.symmetry { Symmetry::all() } else { Symmetry::empty() }
+        );
 
     println!("Generated {} unique patterns", patterns.len());
 
@@ -514,6 +617,8 @@ fn main() -> Result<()> {
     let output_shape = (args.result_height, args.result_width, patterns.len());
     let mut coefficient_matrix =
         bitvec!(BitvecUnderlyingType, Msb0; 1; output_shape.0 * output_shape.1 * output_shape.2);
+
+    // TODO if we're using consider_edges -> then we can directly collapse the outer patterns
 
     let mut rng = WyRand::seed_from_u64(69420);
 

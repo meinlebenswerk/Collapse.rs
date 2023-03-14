@@ -19,7 +19,11 @@ pub struct CLIArguments {
    #[arg(short, long, default_value_t = 3)]
    pub n: u32,
 
+   /// Enables pattern symmetry, generates additional rotated and flipped variants of patterns
+   #[arg(short, long, default_value_t = false)]
+   pub symmetry: bool,
+
    /// Consider edges
    #[arg(short, long, default_value_t = false)]
-   pub consider_edges: bool,
+   pub edges: bool,
 }

@@ -10,6 +10,7 @@ opt-level = 3
 
 [dependencies]
 anyhow = "1.0.69"
+bitflags = "2.0.0"
 bitvec = "1.0.1"
 clap = { version = "4.1.6", features = ["derive"] }
 itertools = "0.10.5"
