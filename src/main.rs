@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use rand_wyrand::WyRand;
 use std::{
     borrow::Borrow,
     collections::{HashMap, HashSet},
@@ -10,7 +11,7 @@ use std::{
 
 use itertools::{iproduct};
 use ndarray::prelude::*;
-use rand::{distributions::WeightedIndex, rngs::ThreadRng, Rng};
+use rand::{distributions::WeightedIndex, SeedableRng, Rng};
 use rayon::prelude::{
     IntoParallelRefIterator, ParallelBridge,
     ParallelIterator,
@@ -277,7 +278,7 @@ fn collapse_single_cell(
     (y, x): &(usize, usize),
     coefficient_matrix: &mut BitVec<u32, Msb0>,
     probabilities: &Array1<f64>,
-    rng: &mut ThreadRng,
+    rng: &mut WyRand,
     output_shape: &(usize, usize, usize),
 ) {
     // Get the possible choices at the given position
@@ -317,7 +318,7 @@ fn collapse_single_cell(
 fn observe(
     coefficient_matrix: &mut BitVec<u32, Msb0>,
     probabilities: &Array1<f64>,
-    rng: &mut ThreadRng,
+    rng: &mut WyRand,
     output_shape: &(usize, usize, usize),
 ) -> ObserveResult {
     // println!("Observe...");
@@ -568,7 +569,7 @@ fn main() -> Result<()> {
     let mut coefficient_matrix =
         bitvec!(BitvecUnderlyingType, Msb0; 1; output_shape.0 * output_shape.1 * output_shape.2);
 
-    let mut rng = rand::thread_rng();
+    let mut rng = WyRand::seed_from_u64(69420);
 
     let maximum_entropy = (output_shape.0 * output_shape.1) as f64;
     let mut progress_bar = progress::Bar::new();
