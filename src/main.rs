@@ -42,7 +42,6 @@ bitflags! {
     }
 }
 
-
 #[derive(Eq, PartialEq, Hash, Debug, Clone)]
 struct Pattern {
     size: usize,
@@ -137,7 +136,7 @@ impl Pattern {
 
 #[derive(PartialEq)]
 enum ObserveResult {
-    Ok((usize, usize), f64),
+    Ok(Vec<(usize, usize)>, f64),
     Contradiction,
     Collapse,
 }
@@ -403,11 +402,8 @@ fn collapse_single_cell(
 fn observe(
     coefficient_matrix: &mut BitVec<u32, Msb0>,
     probabilities: &[f64],
-    rng: &mut WyRand,
     output_shape: &(usize, usize, usize),
 ) -> ObserveResult {
-    // println!("Observe...");
-
     // Check for contradications, aka if any of the wave-masks are completely false
     let has_contradiction = iproduct!(0..output_shape.0, 0..output_shape.1)
         .par_bridge()
@@ -452,9 +448,6 @@ fn observe(
         .min_by(|a, b| a.partial_cmp(b).unwrap())
         .unwrap();
 
-    // dbg!(&entropy_matrix);
-    // println!("emat: {:?}", entropy_matrix);
-
     // Get the corresponding indices
     let min_entropy_indices: Vec<(usize, usize)> = iproduct!(0..output_shape.0, 0..output_shape.1)
         .par_bridge()
@@ -463,20 +456,7 @@ fn observe(
         .map(|(index, _)| index)
         .collect();
 
-    // Select one of the min-entropy-indices to collapse
-    // TODO! Technically we should check if this has any elements left.
-    let selected_index = min_entropy_indices[rng.gen_range(0..min_entropy_indices.len())];
-
-    // Collapse the selected cell
-    collapse_single_cell(
-        &selected_index,
-        coefficient_matrix,
-        probabilities,
-        rng,
-        output_shape,
-    );
-
-    ObserveResult::Ok(selected_index, total_entropy)
+    ObserveResult::Ok(min_entropy_indices, total_entropy)
 }
 
 fn propagate_cell(
@@ -620,11 +600,15 @@ fn main() -> Result<()> {
 
     // TODO if we're using consider_edges -> then we can directly collapse the outer patterns
 
-    let mut rng = WyRand::seed_from_u64(69420);
+    // let mut rng = WyRand::seed_from_u64(69420);
+    let mut rng = WyRand::seed_from_u64(5);
 
     let maximum_entropy = (output_shape.0 * output_shape.1) as f64;
     let mut progress_bar = progress::Bar::new();
     progress_bar.set_job_title("Starting Wavefunction collapse...");
+
+    let mut last_selected_indices = Vec::new();
+    let mut last_coefficient_matrix = coefficient_matrix.clone();
 
     // Loop while we get an okay result
     let mut iteration_index = 0;
@@ -632,22 +616,69 @@ fn main() -> Result<()> {
         let result = observe(
             &mut coefficient_matrix,
             &pattern_probabilities,
-            &mut rng,
             &output_shape,
         );
         // Check if the wave-function has collapsed, or if we've come accross a Contradiction
         match result {
-            ObserveResult::Ok(position, entropy) => {
+            ObserveResult::Ok(min_entropy_indices, entropy) => {
+                // Select one of the min-entropy-indices to collapse
+                // TODO! Technically we should check if this has any elements left.
+                let selected_index = min_entropy_indices[rng.gen_range(0..min_entropy_indices.len())];
+
+                // Save the indices and matrix
+                last_selected_indices = min_entropy_indices.iter().filter(| &&e | e != selected_index).copied().collect();
+                last_coefficient_matrix = coefficient_matrix.clone();
+
+                // Collapse the selected cell
+                collapse_single_cell(
+                    &selected_index,
+                    &mut coefficient_matrix,
+                    &pattern_probabilities,
+                    &mut rng,
+                    &output_shape,
+                );
+
                 progress_bar.set_job_title(&format!("Collapsing Wavefunction, current entropy {:.02}", entropy));
                 progress_bar.reach_percent(((1.0 - entropy/maximum_entropy) * 100.0) as i32);
                 propagate(
-                    position,
+                    selected_index,
                     &mut coefficient_matrix,
                     &rules,
                     &offsets,
                     &output_shape,
                 )
             },
+            ObserveResult::Contradiction => {
+                if !last_selected_indices.is_empty() {
+                    // Backtrack matrix
+                    coefficient_matrix.copy_from_bitslice(&last_coefficient_matrix);
+
+                    let selected_index = last_selected_indices[rng.gen_range(0..last_selected_indices.len())];
+                    
+                    // Update the indices
+                    last_selected_indices = last_selected_indices.iter().filter(| &&e | e != selected_index).copied().collect();
+
+                    // Collapse the selected cell
+                    collapse_single_cell(
+                        &selected_index,
+                        &mut coefficient_matrix,
+                        &pattern_probabilities,
+                        &mut rng,
+                        &output_shape,
+                    );
+
+                    progress_bar.set_job_title(&format!("Encountered Contradiction, backtracking..."));
+                    propagate(
+                        selected_index,
+                        &mut coefficient_matrix,
+                        &rules,
+                        &offsets,
+                        &output_shape,
+                    )
+                } else {
+                    break result;
+                }
+            }
             _ => {
                 break result;
             }
