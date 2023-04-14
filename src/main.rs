@@ -4,8 +4,7 @@ use clap::Parser;
 use image::PaletteImage;
 use rand_wyrand::WyRand;
 use std::{
-    borrow::Borrow,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     convert::TryInto,
     fs,
     path::Path,
@@ -150,17 +149,17 @@ fn generate_pattern_offsets(n: i32) -> Vec<(i32, i32)> {
 
 fn generate_patterns_frequencies_probabilities_from_image(
     sample: &PaletteImage,
-    n: usize,
+    pattern_size: usize,
     symmetry: Symmetry
 ) -> (Vec<Pattern>, Vec<usize>, Vec<f64>) {
     let mut pattern_map: HashMap<Pattern, usize> = HashMap::new();
 
     let PaletteImage{ width, height, .. } = sample;
 
-    for y in 0..(height - n) {
-        for x in 0..(width - n) {
+    for y in 0..(height - pattern_size) {
+        for x in 0..(width - pattern_size) {
             // Base pattern
-            let pattern = Pattern::from_image_and_offset(sample, (y, x), n);
+            let pattern = Pattern::from_image_and_offset(sample, (y, x), pattern_size);
             
             // Symmetries, if required
             if symmetry.contains(Symmetry::ROTATE_90) {
@@ -205,36 +204,6 @@ fn generate_patterns_frequencies_probabilities_from_image(
     (patterns, frequencies, probabilities)
 }
 
-fn generate_palette_from_image(sample: &Image) -> (Vec<[u16; 4]>, HashMap<[u16; 4], usize>) {
-    let palette_set: HashSet<[u16; 4]> = sample.pixels.iter().copied().collect();
-    let reverse_palette: HashMap<[u16; 4], usize> = palette_set
-        .borrow()
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(idx, pixel)| (pixel, idx))
-        .collect();
-
-    let mut palette: Vec<(usize, [u16; 4])> =
-        reverse_palette.iter().map(|(&p, &idx)| (idx, p)).collect();
-    palette.sort_by_key(|e| e.0);
-    let palette = palette.into_iter().map(|(_, p)| p).collect();
-
-    (palette, reverse_palette)
-}
-
-fn encode_image_to_palette(
-    sample: &Image,
-    reverse_palette: &HashMap<[u16; 4], usize>,
-) -> PaletteImage {
-    let Image{ width, height, pixels } = sample;
-    PaletteImage {
-        width: *width,
-        height: *height,
-        pixels: pixels.iter().map(| pixel | reverse_palette.get(pixel).unwrap()).copied().collect()
-    }
-}
-
 /// Generate the rules for a given set of patterns, output is a list for ea. pattern, which contains a list of Rules
 fn generate_rules(patterns: &Vec<Pattern>, offsets: &[(i32, i32)]) -> Vec<Vec<Vec<usize>>> {
     patterns
@@ -266,13 +235,11 @@ fn render_image_from_coefficients(
     coefficient_matrix: &BitVec<u32, Msb0>,
     patterns: &[Pattern],
     palette: &[[u16; 4]],
-    output_shape: &(usize, usize, usize)
+    output_shape: &(usize, usize, usize),
+    pattern_size: usize
 ) -> Image {
     let height = output_shape.0;
     let width = output_shape.1;
-
-    // TODO! This should just be passed as a parameter
-    let pattern_size = patterns[0].size;
 
     // Iterate over the whole image, the patterns are overlayed!
     // This means the result is 1px larger in each dim than the coeff_matrix, I think.
@@ -523,7 +490,6 @@ fn propagate(
     offsets: &[(i32, i32)],
     output_shape: &(usize, usize, usize),
 ) {
-    // println!("Propagating changes...");
     let mut propagation_queue = vec![position];
 
     while let Some(position) = propagation_queue.pop() {
@@ -533,7 +499,6 @@ fn propagate(
                 (position.1 as i32 + offset.1) as usize,
             );
             // Check if the cell is collapsed
-            // println!("Processing propagation to {:?}", &adjacent_cell_position);
             if in_bounds(&adjacent_cell_position, output_shape)
                 && !is_cell_collapsed(&adjacent_cell_position, coefficient_matrix, output_shape)
             {
@@ -560,24 +525,27 @@ fn main() -> Result<()> {
     let offsets = generate_pattern_offsets(args.n as i32);
     println!("Generated {} offsets.", offsets.len());
 
+    // Load Image, generate palette and encode
     let sample = load_image_from_path(&args.sample_path)?;
-    let (palette, reverse_palette) = generate_palette_from_image(&sample);
-    let sample = encode_image_to_palette(&sample, &reverse_palette);
+    let (palette, reverse_palette) = sample.generate_palette();
+    let sample = sample.encode_to_palette(&reverse_palette);
+
+    // Generate Patterns
+    let pattern_size = args.n as usize;
     let (patterns, _, pattern_probabilities) =
         generate_patterns_frequencies_probabilities_from_image(
             &sample,
-            args.n as usize,
+            pattern_size,
             if args.symmetry { Symmetry::all() } else { Symmetry::empty() }
         );
-
     println!("Generated {} unique patterns", patterns.len());
 
+    // Generate Rules
     let rules = generate_rules(&patterns, &offsets);
     println!(
         "Generated {} rules",
         rules.iter().fold(0, |acc, rl| acc + rl.len())
     );
-
     let empty_rules = rules.iter().fold(0, |acc, rl| {
         acc + rl
             .iter()
@@ -598,9 +566,6 @@ fn main() -> Result<()> {
     let mut coefficient_matrix =
         bitvec!(BitvecUnderlyingType, Msb0; 1; output_shape.0 * output_shape.1 * output_shape.2);
 
-    // TODO if we're using consider_edges -> then we can directly collapse the outer patterns
-
-    // let mut rng = WyRand::seed_from_u64(69420);
     let mut rng = WyRand::seed_from_u64(5);
 
     let maximum_entropy = (output_shape.0 * output_shape.1) as f64;
@@ -684,7 +649,7 @@ fn main() -> Result<()> {
             }
         };
         // println!("Rendering intermediate image...");
-        let step_image = render_image_from_coefficients(&coefficient_matrix, &patterns, &palette, &output_shape);
+        let step_image = render_image_from_coefficients(&coefficient_matrix, &patterns, &palette, &output_shape, pattern_size);
         save_image_to_path(&step_image, Path::new(&format!("steps/iteration_{}.png", iteration_index)))?;
         iteration_index += 1;
     };

@@ -1,4 +1,4 @@
-use std::{fs::File, path::Path, io::BufWriter};
+use std::{fs::File, path::Path, io::BufWriter, collections::{HashMap, HashSet}};
 
 use anyhow::Result;
 use pix::{el::Pixel, Raster};
@@ -10,6 +10,35 @@ pub struct Image {
     pub pixels: Vec<[u16; 4]>
 }
 
+impl Image {
+    pub fn encode_to_palette(
+        &self,
+        reverse_palette: &HashMap<[u16; 4], usize>
+    ) -> PaletteImage {
+        PaletteImage {
+            width: self.width,
+            height: self.height,
+            pixels: self.pixels.iter().map(| pixel | reverse_palette.get(pixel).unwrap()).copied().collect()
+        }
+    }
+
+    pub fn generate_palette(&self) -> (Vec<[u16; 4]>, HashMap<[u16; 4], usize>) {
+        let palette_set: HashSet<[u16; 4]> = self.pixels.iter().copied().collect();
+        let reverse_palette: HashMap<[u16; 4], usize> = palette_set
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(idx, pixel)| (pixel, idx))
+            .collect();
+    
+        let mut palette: Vec<(usize, [u16; 4])> =
+            reverse_palette.iter().map(|(&p, &idx)| (idx, p)).collect();
+        palette.sort_by_key(|e| e.0);
+        let palette = palette.into_iter().map(|(_, p)| p).collect();
+    
+        (palette, reverse_palette)
+    }
+}
 
 pub struct PaletteImage {
     pub width: usize,
