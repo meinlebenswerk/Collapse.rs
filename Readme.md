@@ -28,5 +28,4 @@ Intermediate steps are written to `${CWD}/steps/iteration_{idx}`. You can render
 
 ## Known Issues
 
-- Algorithm is slow
-- Since there's no backtracking support, the algorithm may run into a contradiction and stop
+- The algorithm is still very slow
